@@ -1,0 +1,25 @@
+MASTER SERVICES AGREEMENT
+
+This Master Services Agreement (the “Agreement”) is entered into between Globex Analytics LLC (the “Service Provider”) and Northwind Freight Inc. (the “Customer”). Signed for the Service Provider by Zoë Müller, General Counsel, and for the Customer by José Álvarez, Chief Operating Officer.
+
+§ 1. Services
+1.1 The Service Provider shall perform the services described in each Statement of Work.
+1.2 Each Statement of Work forms part of this Agreement. If a Statement of Work conflicts with this Agreement, this Agreement controls.
+
+§ 2. Fees and Payment
+2.1 The Customer shall pay all undisputed invoices within thirty (30) days of receipt.
+2.2 Late payments accrue interest at one percent (1%) per month.
+2.3 The Customer may dispute an invoice in good faith by giving written notice within thirty (30) days of receipt.
+
+§ 3. Confidentiality
+3.1 Each party shall protect the other party’s Confidential Information using at least reasonable care.
+3.2 Confidential Information excludes information that is publicly available through no fault of the receiving party.
+
+§ 4. Term and Termination
+4.1 This Agreement begins on the Effective Date and continues for twelve (12) months.
+4.2 Either party may terminate this Agreement on thirty (30) days’ written notice.
+4.3 Sections § 3 and § 5 survive termination of this Agreement.
+
+§ 5. Limitation of Liability
+5.1 Neither party is liable for indirect or consequential damages.
+5.2 Each party’s total liability under this Agreement is limited to the fees paid in the twelve (12) months before the claim — except for breaches of § 3.

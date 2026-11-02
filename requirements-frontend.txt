@@ -1,0 +1,37 @@
+# The optional redline editor (frontend/): the service's exact pins plus Gradio
+# and the packages it brings in, from pip freeze after installing it on
+# Python 3.12. Installing this changes none of the service's pins.
+-r requirements.txt
+brotli==1.2.1
+filelock==4.2.6
+fsspec==2026.9.0
+gradio==6.31.0
+gradio_client==2.7.2
+groovy==0.1.2
+hf-gradio==0.4.1
+hf-xet==1.8.0
+httpcore2==2.16.0
+httpx2==2.16.0
+huggingface_hub==2.4.0
+Jinja2==3.1.6
+markdown-it-py==4.2.0
+MarkupSafe==3.0.4
+mdurl==0.1.2
+numpy==2.5.4
+orjson==3.13.0
+pandas==3.1.0
+pillow==12.3.0
+pydub==0.25.1
+python-dateutil==4.0.0
+python-multipart==0.0.33
+pytz==2026.6
+PyYAML==6.0.3
+rich==15.0.0
+safehttpx==0.1.7
+semantic-version==2.10.0
+shellingham==1.5.4
+tomlkit==0.14.0
+tqdm==4.70.1
+truststore==0.10.5
+typer==0.27.3
+tzdata==2026.6
