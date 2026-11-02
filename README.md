@@ -19,32 +19,43 @@ lists what I deferred and why.
 
 ## Quick start
 
-Two terminals: the API and the editor. Requires Python 3.12 or newer (tested
-with 3.12.11 on macOS). From the repository root:
+One API server. Requires Python 3.12 or newer (tested with 3.12.11 on
+macOS). From the repository root:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/pip install -r requirements-frontend.txt -e .
-
-# Terminal 1: the API
+.venv/bin/pip install -r requirements.txt -e .
 .venv/bin/uvicorn app.api:app --port 8000 --no-access-log
+```
 
-# Terminal 2: the redline editor
+Then open the **interactive API docs** at <http://127.0.0.1:8000/docs>, or
+try a request from another terminal:
+
+```bash
+curl -sS http://127.0.0.1:8000/documents
+```
+
+The API loads three synthetic documents from `sample_documents/`
+(`nda-acme`, `msa-globex`, `lease-initech`) into memory; a restart resets
+every edit. [Example requests](#example-requests) shows edits and searches.
+
+### Optional: the redline editor
+
+A Gradio page that shows edits as tracked changes. It runs as a second
+server and talks to the API over HTTP. `requirements-frontend.txt` adds
+Gradio to the exact pins in `requirements.txt`. With the API still running:
+
+```bash
+.venv/bin/pip install -r requirements-frontend.txt
 .venv/bin/python -m frontend.redline_app
 ```
 
-Then open:
+Then open <http://127.0.0.1:7860>. Edit a document and see deletions struck
+through and insertions underlined; Save sends one PATCH.
 
-- **Redline editor:** <http://127.0.0.1:7860>. Edit a document and see
-  deletions struck through and insertions underlined; Save sends one PATCH.
-- **Interactive API docs:** <http://127.0.0.1:8000/docs>.
+### Optional: AI suggestions
 
-`requirements-frontend.txt` adds Gradio to the exact pins in
-`requirements.txt` (enough for the API alone). The API loads three synthetic
-documents from `sample_documents/` (`nda-acme`, `msa-globex`,
-`lease-initech`) into memory; a restart resets every edit.
-
-**Optional AI suggestions.** Start the API from a shell with a key:
+Start the API from a shell with a key:
 
 ```bash
 export ANTHROPIC_API_KEY="your-anthropic-api-key"
@@ -64,7 +75,7 @@ bash examples/requests.sh                 # 37 curl requests; API must be runnin
 
 With only `requirements.txt` installed, pytest reports 383 passed and 1
 skipped (`tests/test_frontend_app.py` needs Gradio); with
-`requirements-frontend.txt` installed too, 406 passed. `requests.sh` edits
+`requirements-frontend.txt` installed too, 409 passed. `requests.sh` edits
 documents, so restart the API before each run.
 
 ## Architecture

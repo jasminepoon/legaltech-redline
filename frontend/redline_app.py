@@ -2,7 +2,8 @@
 
 It is only an HTTP client of the running service: it lists documents with
 GET /documents, reads one with GET /documents/{id}, shows edits as tracked
-changes, and saves them all with one PATCH /documents/{id}. Suggest asks
+changes, and saves them all with one PATCH /documents/{id}, keeping any
+typing or document switch made while the PATCH runs. Suggest asks
 POST /documents/{id}/suggestions for one edit and shows it as an unsaved edit,
 unless the editor changed while the model was working.
 Search lists matches in every document with GET /documents/search.
@@ -119,34 +120,42 @@ def start_page(redline_on: bool):
     return (dropdown,) + load_document(document_ids[0], redline_on)
 
 
+@dataclass
+class SaveResult:
+    """A successful save: the document, the text box at the click, and the
+    text and ETag the service saved."""
+
+    document_id: str
+    sent_text: str
+    saved_text: str
+    etag: str
+
+
 def save_changes(
     document_id: str,
     etag: str,
     original_text: str,
     edited_text: str,
-    redline_on: bool,
 ):
-    """Outputs (7): the same as load_document's.
+    """Outputs (2): the save result (None if nothing was saved), status.
 
-    Sends every change in one PATCH, so either all are saved or none is. On
-    success, the saved text becomes the new original. The loaded ID is set
-    again with the text and ETag: if another document was loaded while the
-    PATCH ran, all three still describe one document.
+    Sends every change in one PATCH, so either all are saved or none is. The
+    editor is not changed here: the user may type or load another document
+    while the PATCH runs. show_save_result runs next and decides.
     """
     # Empty when no load has succeeded yet; the URL would then name no document.
     if document_id == "":
-        status = "Not saved: no document is loaded. Pick one or press Reload."
-        return status_only(7, status)
+        return None, "Not saved: no document is loaded. Pick one or press Reload."
 
     changes = build_patch_changes(diff_texts(original_text, edited_text))
     if len(changes) == 0:
-        return status_only(7, "No changes to save.")
+        return None, "No changes to save."
     if len(changes) > MAX_CHANGES_PER_SAVE:
         status = (
             f"Not saved: {len(changes)} changes, but the service accepts at most "
             f"{MAX_CHANGES_PER_SAVE} per save. Save part of the edits first."
         )
-        return status_only(7, status)
+        return None, status
 
     url = f"{BACKEND_URL}/documents/{document_id}"
     # If-Match: save only if the document is still the version that was loaded.
@@ -162,21 +171,77 @@ def save_changes(
         )
     except httpx.HTTPError as error:
         status = f"Not saved: could not reach the service at {BACKEND_URL}: {error}"
-        return status_only(7, status)
+        return None, status
     if response.status_code == 412:
         status = (
             "Not saved: the document changed since you loaded it. "
             "Reload it and make your edits again."
         )
-        return status_only(7, status)
+        return None, status
     if response.status_code != 200:
-        return status_only(7, "Not saved. " + describe_error(response))
+        return None, "Not saved. " + describe_error(response)
 
-    saved_text = response.json()["text"]
-    new_etag = response.headers.get("ETag", "")
-    preview, change_list = show_redline(saved_text, saved_text, redline_on)
-    status = f"Saved {document_id}."
-    return saved_text, document_id, saved_text, new_etag, preview, change_list, status
+    result = SaveResult(
+        document_id=document_id,
+        sent_text=edited_text,
+        saved_text=response.json()["text"],
+        etag=response.headers.get("ETag", ""),
+    )
+    return result, f"Saved {document_id}."
+
+
+def show_save_result(
+    result: SaveResult | None,
+    document_id: str,
+    edited_text: str,
+    redline_on: bool,
+):
+    """Outputs (6): text box, original text, ETag, preview, change list, status.
+
+    Runs after save_changes, with the editor's values as they are now. The
+    saved text and ETag replace the loaded ones only if the editor still shows
+    the saved document, and the text box only if nothing was typed since the
+    click. So a save never erases newer typing, and never pairs one
+    document's ETag with another document.
+    """
+    # save_changes's status already says why nothing was saved.
+    if result is None:
+        return gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip(), gr.skip()
+
+    if result.document_id != document_id:
+        status = (
+            f"Saved {result.document_id}. Still showing {document_id}, "
+            "which was loaded during the save."
+        )
+        return status_only(6, status)
+
+    if edited_text != result.sent_text:
+        preview, change_list = show_redline(result.saved_text, edited_text, redline_on)
+        status = (
+            f"Saved {result.document_id}. Edits typed during the save are "
+            "kept as unsaved changes."
+        )
+        return (
+            gr.skip(),
+            result.saved_text,
+            result.etag,
+            preview,
+            change_list,
+            status,
+        )
+
+    preview, change_list = show_redline(
+        result.saved_text, result.saved_text, redline_on
+    )
+    status = f"Saved {result.document_id}."
+    return (
+        result.saved_text,
+        result.saved_text,
+        result.etag,
+        preview,
+        change_list,
+        status,
+    )
 
 
 @dataclass
@@ -328,6 +393,8 @@ def build_app() -> gr.Blocks:
         loaded_document_id = gr.State("")
         original_text = gr.State("")
         loaded_etag = gr.State("")
+        # Set by save_changes, read by show_save_result.
+        save_result = gr.State(None)
         # Set by request_suggestion, read by show_suggestion.
         pending_suggestion = gr.State(None)
 
@@ -399,20 +466,26 @@ def build_app() -> gr.Blocks:
             outputs=[preview, change_list],
             show_progress="hidden",
         )
+        # Save and Suggest are two steps each: a step chained with .then()
+        # gets the component values as they are when it starts, so
+        # show_save_result and show_suggestion see any load, save, or typing
+        # that happened while the first step was waiting for the service.
         save_button.click(
             save_changes,
-            inputs=[
-                loaded_document_id,
-                loaded_etag,
-                original_text,
+            inputs=[loaded_document_id, loaded_etag, original_text, text_box],
+            outputs=[save_result, status_box],
+        ).then(
+            show_save_result,
+            inputs=[save_result, loaded_document_id, text_box, redline_checkbox],
+            outputs=[
                 text_box,
-                redline_checkbox,
+                original_text,
+                loaded_etag,
+                preview,
+                change_list,
+                status_box,
             ],
-            outputs=load_outputs,
         )
-        # Two steps: a step chained with .then() gets the component values as
-        # they are when it starts, so show_suggestion sees any load, save, or
-        # typing that happened while the model was working.
         suggest_button.click(
             request_suggestion,
             inputs=[

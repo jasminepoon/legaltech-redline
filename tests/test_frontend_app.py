@@ -303,18 +303,94 @@ def load(editor: dict, document_id: str) -> None:
     apply_outputs(editor, LOAD_OUTPUTS, redline_app.load_document(document_id, True))
 
 
-def save(editor: dict) -> tuple:
-    """Run Save with the editor's values and return its outputs, not yet applied."""
-    return redline_app.save_changes(
+# Save: the user can type or pick another document while the PATCH runs.
+
+SHOW_SAVE_RESULT_OUTPUTS = [
+    "text",
+    "original_text",
+    "etag",
+    "preview",
+    "change_list",
+    "status",
+]
+
+
+def click_save(editor: dict) -> object:
+    """Run Save's first step with the editor's values at the click."""
+    result, status = redline_app.save_changes(
         editor["document_id"],
         editor["etag"],
         editor["original_text"],
         editor["text"],
-        True,
+    )
+    editor["status"] = status
+    return result
+
+
+def save_finishes(editor: dict, result: object) -> None:
+    """Run Save's second step with the editor's values when it starts."""
+    outputs = redline_app.show_save_result(
+        result, editor["document_id"], editor["text"], True
+    )
+    apply_outputs(editor, SHOW_SAVE_RESULT_OUTPUTS, outputs)
+
+
+def save(editor: dict) -> None:
+    """Both steps of Save, with the editor unchanged in between."""
+    save_finishes(editor, click_save(editor))
+
+
+def test_save_without_interruption_makes_the_saved_text_the_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = fake_service(monkeypatch)
+    editor = {}
+    load(editor, "nda-acme")
+    editor["text"] = NDA_TEXT + "Signed."
+    service.text_after_patch = NDA_TEXT + "Signed."
+
+    save(editor)
+
+    assert editor["document_id"] == "nda-acme"
+    assert editor["text"] == NDA_TEXT + "Signed."
+    assert editor["original_text"] == NDA_TEXT + "Signed."
+    assert editor["etag"] == '"2"'
+    assert editor["status"] == "Saved nda-acme."
+    assert "<del" not in editor["preview"] and "<ins" not in editor["preview"]
+
+
+def test_typing_during_save_is_kept_as_an_unsaved_edit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = fake_service(monkeypatch)
+    editor = {}
+    load(editor, "nda-acme")
+    editor["text"] = NDA_TEXT + "Signed."
+    service.text_after_patch = NDA_TEXT + "Signed."
+
+    result = click_save(editor)
+    editor["text"] = NDA_TEXT + "Signed. Dated."
+    save_finishes(editor, result)
+
+    assert editor["text"] == NDA_TEXT + "Signed. Dated."
+    assert editor["original_text"] == NDA_TEXT + "Signed."
+    assert editor["etag"] == '"2"'
+    assert "Dated" in editor["preview"] and "<ins" in editor["preview"]
+    assert editor["status"] == (
+        "Saved nda-acme. Edits typed during the save are kept as unsaved changes."
     )
 
+    # The next Save sends only the new typing, against the saved version.
+    service.text_after_patch = NDA_TEXT + "Signed. Dated."
+    save(editor)
+    assert service.patch_calls[1]["headers"] == {"If-Match": '"2"'}
+    changes = service.patch_calls[1]["json"]["changes"]
+    assert len(changes) == 1
+    assert changes[0]["replacement"] == " Dated."
+    assert editor["status"] == "Saved nda-acme."
 
-def test_late_save_reply_keeps_the_loaded_id_text_and_etag_together(
+
+def test_switching_documents_during_save_keeps_the_new_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = fake_service(monkeypatch)
@@ -325,16 +401,56 @@ def test_late_save_reply_keeps_the_loaded_id_text_and_etag_together(
 
     # Save is clicked, then another document is picked, and that load's
     # reply arrives before Save's.
-    save_outputs = save(editor)
+    result = click_save(editor)
     load(editor, "lease-initech")
-    apply_outputs(editor, LOAD_OUTPUTS, save_outputs)
+    editor_before = dict(editor)
+    save_finishes(editor, result)
 
-    assert editor["document_id"] == "nda-acme"
-    assert editor["text"] == NDA_TEXT + "Signed."
-    assert editor["original_text"] == NDA_TEXT + "Signed."
-    assert editor["etag"] == '"2"'
-    assert editor["status"] == "Saved nda-acme."
-    assert len(service.patch_calls) == 1
+    # The dropdown shows lease-initech, and so does everything Save uses.
+    for name in LOAD_OUTPUTS:
+        if name != "status":
+            assert editor[name] == editor_before[name]
+    assert editor["document_id"] == "lease-initech"
+    assert editor["text"] == LEASE_TEXT
+    assert editor["etag"] == '"1"'
+    assert editor["status"] == (
+        "Saved nda-acme. Still showing lease-initech, which was loaded during the save."
+    )
+    assert service.texts["nda-acme"] == NDA_TEXT + "Signed."
+
+    # Edits to lease-initech go to lease-initech, with its own ETag.
+    editor["text"] = LEASE_TEXT + "Paid."
+    service.text_after_patch = LEASE_TEXT + "Paid."
+    save(editor)
+    assert service.patch_calls[1]["url"].endswith("/documents/lease-initech")
+    assert service.patch_calls[1]["headers"] == {"If-Match": '"1"'}
+    assert editor["status"] == "Saved lease-initech."
+
+
+def test_failed_save_changes_nothing_but_the_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_service(monkeypatch)
+    editor = {}
+    load(editor, "nda-acme")
+    editor["text"] = NDA_TEXT + "Signed."
+    editor_before = dict(editor)
+
+    def stale_patch(
+        url: str, json: dict, headers: dict, timeout: float
+    ) -> httpx.Response:
+        return httpx.Response(412, json={"error": "Version mismatch.", "code": 412})
+
+    monkeypatch.setattr(httpx, "patch", stale_patch)
+    save(editor)
+
+    assert editor["status"] == (
+        "Not saved: the document changed since you loaded it. "
+        "Reload it and make your edits again."
+    )
+    for name in LOAD_OUTPUTS:
+        if name != "status":
+            assert editor[name] == editor_before[name]
 
 
 # Suggest: the model's reply can arrive many seconds after the click.
@@ -391,7 +507,7 @@ def test_suggestion_is_shown_and_saved_when_the_editor_did_not_change(
     assert editor["text"] == NDA_TEXT.replace("30 days", "60 days")
 
     service.text_after_patch = editor["text"]
-    apply_outputs(editor, LOAD_OUTPUTS, save(editor))
+    save(editor)
     assert editor["status"] == "Saved nda-acme."
     assert service.patch_calls[0]["url"].endswith("/documents/nda-acme")
     assert service.patch_calls[0]["headers"] == {"If-Match": '"1"'}
@@ -411,7 +527,7 @@ def test_suggestion_is_discarded_after_switching_documents(
     assert_discarded(editor, editor_before)
     assert editor["text"] == LEASE_TEXT
 
-    apply_outputs(editor, LOAD_OUTPUTS, save(editor))
+    save(editor)
     assert editor["status"] == "No changes to save."
     assert service.patch_calls == []
 
@@ -431,7 +547,7 @@ def test_suggestion_is_discarded_after_typing(
 
     # Save sends the typed edit only.
     service.text_after_patch = NDA_TEXT + "Signed."
-    apply_outputs(editor, LOAD_OUTPUTS, save(editor))
+    save(editor)
     assert editor["status"] == "Saved nda-acme."
     changes = service.patch_calls[0]["json"]["changes"]
     assert len(changes) == 1
@@ -454,7 +570,7 @@ def test_suggestion_is_discarded_after_reloading_a_newer_version(
     assert_discarded(editor, editor_before)
     assert editor["text"] == NDA_TEXT + "Amended.\n"
 
-    apply_outputs(editor, LOAD_OUTPUTS, save(editor))
+    save(editor)
     assert editor["status"] == "No changes to save."
     assert service.patch_calls == []
 
@@ -468,7 +584,7 @@ def test_suggestion_is_discarded_after_saving(
     pending = click_suggest(editor)
     editor["text"] = NDA_TEXT + "Signed."
     service.text_after_patch = NDA_TEXT + "Signed."
-    apply_outputs(editor, LOAD_OUTPUTS, save(editor))
+    save(editor)
     editor_before = dict(editor)
     assert editor["etag"] == '"2"'
 
@@ -476,7 +592,7 @@ def test_suggestion_is_discarded_after_saving(
     assert_discarded(editor, editor_before)
     assert editor["text"] == NDA_TEXT + "Signed."
 
-    apply_outputs(editor, LOAD_OUTPUTS, save(editor))
+    save(editor)
     assert editor["status"] == "No changes to save."
     assert len(service.patch_calls) == 1
 

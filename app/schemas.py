@@ -32,7 +32,11 @@ class TextTarget(BaseModel):
 class Change(BaseModel):
     model_config = STRICT_FIELDS
 
-    # Only "replace" exists today; another operation would be added here.
+    # Only "replace" exists. api.py's to_text_changes does not copy operation,
+    # and text_ops.apply_one_change always replaces, so a name added here alone
+    # would still run a replacement. A new operation must also be passed
+    # through to_text_changes into a new TextChange field and handled in
+    # apply_one_change.
     operation: Literal["replace"]
     target: TextTarget
     replacement: str
