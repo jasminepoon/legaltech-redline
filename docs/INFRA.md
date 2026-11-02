@@ -1,17 +1,49 @@
 # Production infrastructure design
 
-## Where the prototype stands
+## Key assumptions
 
-I spent the take-home on getting the editing rules right, so I kept the usual
-prototype shape: one process, no outside services, clear seams.
+**A1. Business and users**
 
-It redlines legal documents with all-or-nothing changes, searches snippets
-across them, and asks a model for one suggested edit, which the user accepts
-through PATCH.
+- Law firms and legal teams redline contracts against deadlines.
+- Correct, attributable edits outrank raw speed.
+- A person accepts every model suggestion.
+
+**A2. Data and compliance**
+
+- Privileged client documents; no tenant may see another's.
+- Customers expect SOC 2 and GDPR answers; some require data residency.
+- The model provider neither trains on nor retains our text.
+
+**A3. Workload and scale (assumed, not measured)**
+
+- Tens to hundreds of firms; up to tens of thousands of users.
+- Most contracts are under 1 MB; the README benchmark tested 10 MiB.
+- Reads and searches far outnumber edits; a few suggestions per user per day.
+
+**A4. Infrastructure and technology**
+
+- AWS, managed services by default.
+- Keep the Python/FastAPI service and its layers; PostgreSQL replaces the
+  storage module as the system of record.
+
+**A5. Team and operations**
+
+- A small team: low operational burden beats fine-grained control.
+- Model spend is the main variable cost.
+
+## Prototype scope and deferred work
+
+My priority was the core requirements: correct redlining (precise,
+all-or-nothing edits that never land in the wrong place), search across
+documents, and a basic LLM integration. I deferred everything else by three
+rules: it doesn't change whether an edit is correct; it needs real customers,
+traffic, or an environment to decide well (identity provider, tenants,
+regions, load); and today's code has a clear seam to add it later (the
+storage module, the service layer, the model client).
 
 | Limitation today | Why it was right for the take-home | Fixed in |
 | --- | --- | --- |
-| Texts and versions in Python dicts: a restart loses every edit; no edit history | No setup for reviewers; storage is one module to swap | §1 |
+| Texts and versions in Python dicts: a restart loses every edit; no edit history | No setup for reviewers | §1 |
 | One process, one `threading.Lock`: 100 space-targeting changes hold it about 22 s on a 10 MiB document. `If-Match` is optional (missing or `*` skips the check) | One lock makes all-or-nothing edits and version checks easy to prove; the editor sends `If-Match` | §1, §3 |
 | Search scans the full text: about 14 ms for 78,252 matches on 10 MiB | Any literal substring works, measured fast; no index to sync | Phase 4 |
 | One synchronous model call, no retries; failures are a 502 | Suggestions never save, so a failure loses nothing | §3 |
@@ -19,18 +51,16 @@ through PATCH.
 
 ## How I'd order the work
 
-Law firms lose trust over a lost or leaked redline, not a slow search, so I
-rank the work by that risk, highest first:
+Given A1 and A2, a lost or leaked redline is the worst failure, so I rank
+the work by risk, highest first:
 
 1. **Data integrity and durability:** PostgreSQL, required `If-Match`, an
    edit log.
-2. **Security, privacy, and compliance:** SSO, tenant isolation, encryption,
-   audit, model-provider terms.
-3. **Reliability and scale:** zones, autoscaling, model timeouts, canaries.
+2. **Security, privacy, and compliance:** SSO, tenant isolation, audit.
+3. **Reliability and scale:** zones, autoscaling, timeouts, canaries.
 4. **Operability and cost:** text-free telemetry, model budgets.
 
-The sections follow this order; the build plan also respects dependencies,
-so monitoring ships before scaling. **Everything below is proposed.**
+The sections follow this order. **Everything below is proposed.**
 
 ## Target architecture and infrastructure
 
@@ -86,13 +116,13 @@ flowchart TD
 
 ### Key decisions and alternatives
 
-A small team should build legal features, not run servers, so I default to
-managed services.
+A small team (A5) should build legal features, not run servers, so I
+default to managed services.
 
 | Decision | Chosen | Alternatives | Why |
 | --- | --- | --- | --- |
-| Compute | ECS Fargate, 2+ zones, ALB + WAF | EKS; Lambda; EC2 | No cluster or hosts to run, at a higher vCPU price; Lambda's 6 MB buffered response is below a 10 MB document |
-| Storage | RDS PostgreSQL, multi-AZ; S3 for uploads and audit archive | DynamoDB; S3 only | Version and history in one transaction; row-level security; DynamoDB items cap at 400 KB. Cost: multi-AZ about doubles database cost; each save rewrites the text |
+| Compute | ECS Fargate, 2+ zones, ALB + WAF | EKS; Lambda; EC2 | No cluster or hosts, at a higher vCPU price; Lambda's 6 MB buffered response is below a 10 MB document |
+| Storage | RDS PostgreSQL, multi-AZ; S3 for uploads and audit archive | DynamoDB; S3 only | Version and history in one transaction; row-level security; DynamoDB caps items at 400 KB. Multi-AZ about doubles cost; each save rewrites the text |
 | Conflicting edits | Required `If-Match` (428 without), conditional `UPDATE` | Row lock (`FOR UPDATE`) | Today's lock can't span containers; a row lock holds a connection through a slow edit |
 | Tenancy | Shared tables keyed by `tenant_id`; row-level security as backstop | Schema or database per tenant | One schema to migrate, one pool to size |
 | Auth | Customer SSO (OIDC/OAuth2); tokens carry tenant and role | Local passwords; static API keys | Firms keep their own MFA and offboarding; scripts use client credentials |
@@ -103,9 +133,9 @@ managed services.
 
 ## 1. Data integrity and durability
 
-Redlines are the client's work product, so every edit must be durable,
-attributable, and replayable; I'd use the standard transactional database,
-optimistic concurrency, and an append-only edit log.
+Client work product (A2) means every edit must be durable, attributable,
+and replayable; I'd use the standard transactional database, optimistic
+concurrency, and an append-only edit log.
 
 - `document_edits`: one row per applied change, keyed by `(tenant_id,
   document_id, version, change_index)`, with `start`, `old_text`, `new_text`,
@@ -138,8 +168,8 @@ sequenceDiagram
 
 ## 2. Security, privacy, and compliance
 
-Firms share privileged documents, and one cross-customer leak would end the
-product, so I'd follow the standard SaaS baseline.
+One cross-customer leak would end the product, so I'd follow the standard
+SaaS baseline.
 
 - **Access:** viewer and editor roles. Every query is tenant-scoped (another
   tenant's document is a 404), search included, since snippets expose text.
@@ -147,15 +177,15 @@ product, so I'd follow the standard SaaS baseline.
   database password in Secrets Manager, rotated.
 - **Audit:** edit history plus a write-once log of reads, searches, and
   suggestions (IDs only).
-- **LLM data:** opt-in per tenant; zero-retention, no-training provider terms;
-  in-region where required.
-- **GDPR/SOC 2:** deletion includes history; backups expire; EU data stays in
-  the EU. These support an audit; they are not compliance.
+- **LLM data:** opt-in per tenant, under A2's provider terms, in-region
+  where required.
+- **GDPR/SOC 2:** deletion includes history; backups expire; residency per
+  region. These support an audit; they are not compliance.
 
 ## 3. Reliability and scale
 
-Lawyers redline against deadlines, so editing and search must survive outages
-and bad releases; I'd use standard redundancy, timeouts, and canaries.
+Deadlines (A1) mean editing and search must survive outages and bad
+releases; I'd use standard redundancy, timeouts, and canaries.
 
 **Scalability and resilience**
 
@@ -174,8 +204,8 @@ and bad releases; I'd use standard redundancy, timeouts, and canaries.
 
 ## 4. Operability and cost
 
-Nobody should read a client's document to debug, and model spend grows with
-use, so I'd use text-free telemetry and hard budgets.
+Nobody should read a client's document to debug, so telemetry stays
+text-free, and model spend (A5) gets hard budgets.
 
 **Monitoring and observability**
 
@@ -189,8 +219,6 @@ use, so I'd use text-free telemetry and hard budgets.
 - **LLM:** about $0.0001 per call measured, $0.002 estimated at the
   50,000-character cap. Per-tenant token budgets, per-user rate limits, and a
   provider spend cap.
-- **Infrastructure:** right-size from utilization; the table notes accepted
-  premiums.
 
 ## Build plan: if I were to build this, in this order
 
